@@ -24,12 +24,16 @@ type Code int
 
 const (
 	NotHandled            Code = iota
+	MetadataUpdated
+	MetadataSkipped
 	DiscoveredImage            // = "Scanned image"
 	DiscoveredVideo            // = "Scanned video"
 	DiscoveredSidecar          // = "Scanned side car file"
 	DiscoveredDiscarded        // = "Discarded"
 	DiscoveredUnsupported      // = "File type not supported"
 	DiscoveredUseless          // = "Useless file"
+	DiscoveredAlbum            // = "Album discovered in takeout"
+	DiscoveredEmptyAlbum       // = "Album with no assets"
 
 	AnalysisAssociatedMetadata
 	AnalysisMissingAssociatedMetadata
@@ -60,12 +64,16 @@ const (
 
 var _code = map[Code]string{
 	NotHandled:            "Not handled",
+	MetadataUpdated:       "Metadata updated",
+	MetadataSkipped:       "Metadata skipped",
 	DiscoveredImage:       "scanned image file",
 	DiscoveredVideo:       "scanned video file",
 	DiscoveredSidecar:     "scanned sidecar file",
 	DiscoveredDiscarded:   "discarded file",
 	DiscoveredUnsupported: "unsupported file",
 	DiscoveredUseless:     "useless file",
+	DiscoveredAlbum:       "album discovered in takeout",
+	DiscoveredEmptyAlbum:  "album with no assets",
 
 	AnalysisAssociatedMetadata:        "associated metadata file",
 	AnalysisMissingAssociatedMetadata: "missing associated metadata file",
@@ -92,11 +100,15 @@ var _code = map[Code]string{
 }
 
 var _logLevels = map[Code]slog.Level{
+	MetadataUpdated:       slog.LevelInfo,
+	MetadataSkipped:       slog.LevelInfo,
 	DiscoveredImage:                   slog.LevelInfo,
 	DiscoveredVideo:                   slog.LevelInfo,
 	DiscoveredDiscarded:               slog.LevelWarn,
 	DiscoveredUnsupported:             slog.LevelWarn,
 	DiscoveredUseless:                 slog.LevelWarn,
+	DiscoveredAlbum:                   slog.LevelInfo,
+	DiscoveredEmptyAlbum:              slog.LevelWarn,
 	AnalysisAssociatedMetadata:        slog.LevelInfo,
 	AnalysisMissingAssociatedMetadata: slog.LevelWarn,
 	AnalysisLocalDuplicate:            slog.LevelWarn,

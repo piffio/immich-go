@@ -16,7 +16,15 @@ func NewFromPicasaCommand(ctx context.Context, parent *cobra.Command, app *app.A
 	cmd := &cobra.Command{
 		Use:   "from-picasa [flags] <path>...",
 		Short: "Upload photos from a Picasa folder or zip file",
-		Args:  cobra.MinimumNArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			// Check if only-update-metadata flag is set
+			if cmd.Flags().Lookup("only-update-metadata").Changed {
+				if len(args) == 0 {
+					return errors.New("when using --only-update-metadata, you must specify the path(s) to your files for asset matching (e.g., '/path/to/picasa-folder')")
+			}
+			}
+			return cobra.MinimumNArgs(1)(cmd, args)
+		},
 	}
 	cmd.SetContext(ctx)
 	options := &folder.ImportFolderOptions{}

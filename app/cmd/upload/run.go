@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/simulot/immich-go/adapters"
@@ -42,6 +43,13 @@ type UpCmd struct {
 
 	shouldResumeJobs map[string]bool // List of jobs to resume
 	finished         bool            // the finish task has been run
+
+	// Album debugging fields
+	albumStats struct {
+		ExpectedAlbums map[string]int // Album name -> expected count from takeout
+		ProcessedAlbums map[string]int // Album name -> actual processed count
+		AlbumOperations int // Total album operations performed
+	}
 }
 
 func newUpload(mode UpLoadMode, app *app.Application, options *UploadOptions) *UpCmd {
@@ -52,6 +60,10 @@ func newUpload(mode UpLoadMode, app *app.Application, options *UploadOptions) *U
 		localAssets:       syncset.New[string](),
 		immichAssetsReady: make(chan struct{}),
 	}
+
+	// Initialize album debugging maps
+	upCmd.albumStats.ExpectedAlbums = make(map[string]int)
+	upCmd.albumStats.ProcessedAlbums = make(map[string]int)
 
 	return upCmd
 }
@@ -167,6 +179,27 @@ func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 		for _, s := range lines {
 			app.Jnl().Log().Info(s)
 		}
+	}
+
+	// Add album debugging summary
+	if len(UpCmd.albumStats.ExpectedAlbums) > 0 || len(UpCmd.albumStats.ProcessedAlbums) > 0 {
+		app.Jnl().Log().Info("=== ALBUM DEBUGGING SUMMARY ===")
+
+		if len(UpCmd.albumStats.ExpectedAlbums) > 0 {
+			app.Jnl().Log().Info("Albums found in takeout:")
+			for album, count := range UpCmd.albumStats.ExpectedAlbums {
+				app.Jnl().Log().Info(fmt.Sprintf("  %s: %d assets", album, count))
+			}
+		}
+
+		if len(UpCmd.albumStats.ProcessedAlbums) > 0 {
+			app.Jnl().Log().Info("Albums processed on Immich:")
+			for album, count := range UpCmd.albumStats.ProcessedAlbums {
+				app.Jnl().Log().Info(fmt.Sprintf("  %s: %d operations", album, count))
+			}
+		}
+
+		app.Jnl().Log().Info(fmt.Sprintf("Total album operations performed: %d", UpCmd.albumStats.AlbumOperations))
 	}
 
 	return nil
@@ -438,18 +471,37 @@ func (upCmd *UpCmd) handleAsset(ctx context.Context, a *assets.Asset) error {
 
 	case AlreadyProcessed: // SHA1 already processed
 		upCmd.app.Jnl().Record(ctx, fileevent.AnalysisLocalDuplicate, a.File, "reason", "the file is already present in the input", "original name", advice.ServerAsset.OriginalFileName)
+		if upCmd.OnlyUpdateMetadata {
+			upCmd.app.Jnl().Record(ctx, fileevent.MetadataUpdated, a.File)
+			upCmd.manageAssetAlbums(ctx, a.File, advice.ServerAsset.ID, advice.ServerAsset.Albums)
+			upCmd.manageAssetTags(ctx, a)
+		}
 		return nil
 
 	case SameOnServer:
 		a.ID = advice.ServerAsset.ID
 		a.Albums = append(a.Albums, advice.ServerAsset.Albums...)
 		upCmd.app.Jnl().Record(ctx, fileevent.UploadServerDuplicate, a.File, "reason", advice.Message)
-		upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
+		if upCmd.OnlyUpdateMetadata {
+			upCmd.app.Jnl().Record(ctx, fileevent.MetadataUpdated, a.File)
+			upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
+			upCmd.manageAssetTags(ctx, a)
+		} else {
+			upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
+		}
+		return nil
 
 	case BetterOnServer: // and manage albums
 		a.ID = advice.ServerAsset.ID
 		upCmd.app.Jnl().Record(ctx, fileevent.UploadServerBetter, a.File, "reason", advice.Message)
-		upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
+		if upCmd.OnlyUpdateMetadata {
+			upCmd.app.Jnl().Record(ctx, fileevent.MetadataUpdated, a.File)
+			upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
+			upCmd.manageAssetTags(ctx, a)
+		} else {
+			upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
+		}
+		return nil
 
 	case ForceUpload:
 		var serverStatus string
@@ -563,6 +615,9 @@ func (upCmd *UpCmd) manageAssetAlbums(ctx context.Context, f fshelper.FSAndName,
 		al := assets.NewAlbum("", album.Title, album.Description)
 		if upCmd.albumsCache.AddIDToCollection(al.Title, album, ID) {
 			upCmd.app.Jnl().Record(ctx, fileevent.UploadAddToAlbum, f, "album", al.Title)
+			// Track album operations for debugging
+			upCmd.albumStats.AlbumOperations++
+			upCmd.albumStats.ProcessedAlbums[album.Title]++
 		}
 	}
 }
@@ -577,8 +632,23 @@ func (upCmd *UpCmd) manageAssetTags(ctx context.Context, a *assets.Asset) {
 		tags[i] = a.Tags[i].Name
 	}
 	for _, t := range a.Tags {
-		if upCmd.tagsCache.AddIDToCollection(t.Name, t, a.ID) {
-			upCmd.app.Jnl().Record(ctx, fileevent.Tagged, a.File, "tag", t.Value)
+		// Retry logic for metadata-only mode to work around Immich race condition bug #16747
+		if upCmd.OnlyUpdateMetadata {
+			const maxRetries = 3
+			for attempt := 0; attempt < maxRetries; attempt++ {
+				if upCmd.tagsCache.AddIDToCollection(t.Name, t, a.ID) {
+					upCmd.app.Jnl().Record(ctx, fileevent.Tagged, a.File, "tag", t.Value)
+					break // Success, exit retry loop
+				} else if attempt < maxRetries-1 {
+					// Wait before retry (exponential backoff)
+					time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+					upCmd.app.Log().Debug("Retrying tag operation", "tag", t.Value, "asset", a.ID, "attempt", attempt+1)
+				}
+			}
+		} else {
+			if upCmd.tagsCache.AddIDToCollection(t.Name, t, a.ID) {
+				upCmd.app.Jnl().Record(ctx, fileevent.Tagged, a.File, "tag", t.Value)
+			}
 		}
 	}
 }

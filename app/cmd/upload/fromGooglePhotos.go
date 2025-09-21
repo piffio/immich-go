@@ -20,7 +20,15 @@ func NewFromGooglePhotosCommand(ctx context.Context, parent *cobra.Command, app 
 	cmd := &cobra.Command{
 		Use:   "from-google-photos [flags] <takeout-*.zip> | <takeout-folder>",
 		Short: "Upload photos either from a zipped Google Photos takeout or decompressed archive",
-		Args:  cobra.MinimumNArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			// Check if only-update-metadata flag is set
+		if cmd.Flags().Lookup("only-update-metadata").Changed {
+				if len(args) == 0 {
+					return errors.New("when using --only-update-metadata, you must specify the path(s) to your files for asset matching (e.g., '/path/to/takeout-*.zip' or '/path/to/folder')")
+				}
+			}
+			return cobra.MinimumNArgs(1)(cmd, args)
+		},
 	}
 	cmd.SetContext(ctx)
 	options := &gp.ImportFlags{}

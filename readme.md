@@ -266,7 +266,7 @@ The **upload** command need the following options to manage the connection with 
 | -s, --server         |                   | Immich server address (e.g http://your-ip:2283 or https://your-domain) (**MANDATORY**)                                                    |
 | -k, --api-key        |                   | API Key (**MANDATORY**)                                                                                                                   |
 | --admin-api-key      |                   | The Immichs admin's API key, used to pause and resume the server's jobs during operations (**MANDATORY** when uploading for a non-admin ) |
-| --no-ui              |      `FALSE`      | Disable the user interface                                                                                                                |
+| --only-update-metadata | `FALSE` | Update metadata for existing assets without re-uploading files (Workaround for Immich bug #16747) |                                                                                                               |
 | --api-trace          |      `FALSE`      | Enable trace of api calls                                                                                                                 |
 | --client-timeout     |       `20m`       | Set server calls timeout                                                                                                                  |
 | --device-uuid string |   `$LOCALHOST`    | Set a device UUID                                                                                                                         |
@@ -294,10 +294,91 @@ Example:
 immich-go upload from-folder --server=http://your-ip:2283 --api-key=your-api-key --overwrite /path/to/your/photos
 ```
 
-# The **archive** command:
+## **--only-update-metadata**
 
-The **archive** command writes the content taken from the source given by the sub-command to a folder tree.
-The destination folder isn't wiped out before the operation, so it's possible to add new photos to an existing archive.
+The `--only-update-metadata` flag provides a workaround for an upstream Immich race condition bug (#16747) where tags are not properly attached to assets during upload. This flag allows you to update metadata for existing assets without re-uploading the files.
+
+**Usage Pattern:**
+1. First, upload your files normally without tags
+2. Then run a second pass with `--only-update-metadata` and the desired tag/album flags
+
+**Example:**
+```bash
+# Step 1: Upload files without tags
+immich-go upload from-folder --server=http://your-ip:2283 --api-key=your-api-key /path/to/your/photos
+
+# Step 2: Apply metadata in a separate pass
+immich-go upload from-folder --server=http://your-ip:2283 --api-key=your-api-key --only-update-metadata --tag vacation --into-album Summer-2024 /path/to/your/photos
+```
+
+**Important Notes:**
+- This flag requires at least one metadata flag to be specified (e.g., `--tag`, `--into-album`, `--session-tag`)
+- **File paths are still required** - you must specify the path(s) to your files for asset matching (e.g., '/path/to/takeout-*.zip' or '/path/to/folder')
+- Cannot be used with `--overwrite` as it would be redundant
+- Works with all upload subcommands: `from-folder`, `from-google-photos`, etc.
+- Includes retry logic to work around the underlying server-side race condition
+- Use `--dry-run` with this flag to preview what metadata would be applied
+
+**Supported Metadata Operations:**
+- Tags (manual, session, takeout, people, folder-based)
+- Albums (manual, folder-based)
+- All other asset metadata that can be updated via the Immich API
+
+**Asset Matching:**
+The tool matches local files to server assets using the following criteria in order of priority:
+1. **Filename + file size + capture date** (most accurate)
+2. **Filename + file size** (fallback)
+
+## **Troubleshooting Metadata Updates**
+
+### **--only-update-metadata Issues**
+
+**Problem:** Tags are not being applied to assets
+- **Solution:** This may be due to the upstream Immich race condition bug (#16747). The `--only-update-metadata` flag includes retry logic, but if it still fails:
+  1. Try running the command again - the issue is often intermittent
+  2. Use `--dry-run` first to verify asset matching
+  3. Check the logs for specific error messages
+  4. Consider updating your Immich server to a version that fixes this bug
+
+**Problem:** Files are not found on the server
+- **Solution:** This indicates that the assets haven't been uploaded yet or were uploaded with different filenames/sizes
+  1. First upload the files without metadata: `immich-go upload from-folder --server=... /path/to/files`
+  2. Then run metadata update: `immich-go upload from-folder --server=... --only-update-metadata --tag vacation /path/to/files`
+  3. Check that files exist on the server with the same names and sizes
+
+**Problem:** "requires at least 1 arg(s), only received 0" error
+- **Solution:** Even when using `--only-update-metadata`, you must provide the file/folder paths for asset matching
+  1. Add the path to your files at the end of the command: `--only-update-metadata /path/to/your/files`
+  2. Use the same path that was used during the initial upload
+  3. For Google Photos takeouts, use: `/path/to/takeout-*.zip` to match multiple archive files
+
+**Problem:** Cannot use `--only-update-metadata` with `--overwrite`
+- **Solution:** This is intentional - the two flags are incompatible. Use `--overwrite` during initial upload if needed, then use `--only-update-metadata` for subsequent metadata updates.
+
+**Problem:** No metadata flags specified error
+- **Solution:** The `--only-update-metadata` flag requires at least one metadata operation. Add flags like:
+  - `--tag vacation` - to add tags
+  - `--into-album Summer-2024` - to add to albums
+  - `--session-tag` - to add session tags
+  - `--folder-as-tags` - to use folder structure as tags
+
+**Problem:** Assets are being skipped (not matched)
+- **Solution:** Check the logs for the specific reason:
+  - **File not found on server:** Upload the files first
+  - **Multiple matches:** The matching algorithm found ambiguous results
+  - **Matching failed:** Check that filenames and file sizes match exactly between local and server versions
+
+### **Debugging Tips**
+- Use `--log-level DEBUG` to see detailed matching information
+- Use `--dry-run` to preview what would be changed without making actual updates
+- Check server asset details via the Immich web interface
+- Verify file sizes match exactly (use `ls -la` locally and check Immich asset details)
+
+### **Performance Considerations**
+- Metadata-only updates are generally faster than full uploads
+- Large collections may take time due to API calls for each asset
+- Consider using `--no-ui` for batch operations to avoid UI overhead
+- The retry logic adds some delay but improves reliability
 
 The command accepts three sub-commands:
   * [from-folder](#from-folder-sub-command) to create a folder archive from a local folder or a zipped archive
